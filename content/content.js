@@ -158,19 +158,20 @@
   // ── Pagination ─────────────────────────────────────────────
 
   function findNextPageButton() {
-    // Try multiple strategies to find the "next page" button
+    // Strategy 1: Dune uses SVG with aria-label inside button
+    const svgNext = document.querySelector('svg[aria-label="Next page"], svg[aria-label="next page"]');
+    if (svgNext) {
+      const btn = svgNext.closest('button');
+      if (btn && !btn.disabled) return btn;
+    }
+
+    // Strategy 2: Direct aria-label on button/link
     const selectors = [
-      // Direct next/arrow buttons
       'button[aria-label*="next" i]',
-      'button[aria-label*="Next" i]',
       'a[aria-label*="next" i]',
       '[class*="pagination"] button:last-child',
       '[class*="Pagination"] button:last-child',
-      // SVG arrow buttons (Dune uses these)
-      '[class*="pagination"] button svg',
-      // Generic right arrow / chevron
       'button[class*="next" i]',
-      'button[class*="Next" i]',
       'a[class*="next" i]',
     ];
 
@@ -184,22 +185,42 @@
       }
     }
 
-    // Fallback: look for ">" or "›" text in pagination area
-    const paginationArea = document.querySelector(
-      '[class*="pagination" i], [class*="Pagination"]'
-    );
-    if (paginationArea) {
-      const buttons = paginationArea.querySelectorAll('button, a');
+    // Strategy 3: Find pagination footer and get last enabled button
+    const footer = findPaginationFooter();
+    if (footer) {
+      const buttons = footer.querySelectorAll('button, a');
       for (const btn of buttons) {
         const text = btn.textContent.trim();
         if (text === '>' || text === '›' || text === '→' || text === '»') {
           if (!btn.disabled) return btn;
         }
       }
-      // Also try the last button as potential "next"
-      const allBtns = Array.from(buttons).filter(b => !b.disabled);
-      if (allBtns.length >= 2) {
-        return allBtns[allBtns.length - 1];
+    }
+
+    return null;
+  }
+
+  function findPaginationFooter() {
+    // Dune uses CSS module classes like TableFooter-module__*__footer
+    // Strategy 1: Find by class substring
+    const byClass = document.querySelector(
+      '[class*="TableFooter"], [class*="pagination" i], [class*="Pagination"]'
+    );
+    if (byClass) return byClass;
+
+    // Strategy 2: Find the container that has "rows" text + page buttons
+    const svgPrev = document.querySelector('svg[aria-label="Previous page"]');
+    if (svgPrev) {
+      let el = svgPrev.closest('ul');
+      if (el) el = el.closest('ul') || el.parentElement;
+      return el;
+    }
+
+    // Strategy 3: Look for span containing "rows" text near page numbers
+    const spans = document.querySelectorAll('span');
+    for (const span of spans) {
+      if (/^\d[\d,]*\s*rows$/i.test(span.textContent.trim())) {
+        return span.closest('ul') || span.parentElement;
       }
     }
 
@@ -207,27 +228,41 @@
   }
 
   function findPaginationInfo() {
-    // Try to detect current page and total pages
-    const paginationArea = document.querySelector(
-      '[class*="pagination" i], [class*="Pagination"]'
-    );
-    if (!paginationArea) return { current: 1, total: 1 };
+    const footer = findPaginationFooter();
 
-    const text = paginationArea.textContent;
+    // Strategy 1: Find page buttons in the footer
+    if (footer) {
+      const text = footer.textContent;
+      const pageNumbers = text.match(/\d+/g);
+      if (pageNumbers && pageNumbers.length > 0) {
+        const nums = pageNumbers.map(Number);
+        const total = Math.max(...nums);
+        // Current page: input field value or active button
+        const pageInput = footer.querySelector('input[type="text"], input[type="number"], input');
+        if (pageInput) {
+          const current = parseInt(pageInput.value || pageInput.getAttribute('text') || '1', 10) || 1;
+          return { current, total };
+        }
+        const activeBtn = footer.querySelector(
+          '[aria-current="page"], [aria-current="true"], ' +
+          'button[class*="active" i], a[class*="active" i]'
+        );
+        const current = activeBtn ? parseInt(activeBtn.textContent.trim(), 10) || 1 : 1;
+        return { current, total };
+      }
+    }
 
-    // "1 2 ... 164690" pattern
-    const pageNumbers = text.match(/\d+/g);
-    if (pageNumbers && pageNumbers.length > 0) {
-      const nums = pageNumbers.map(Number);
-      const total = Math.max(...nums);
-      // Current page is usually highlighted or active
-      const activeBtn = paginationArea.querySelector(
-        'button[aria-current="page"], button[class*="active" i], ' +
-        'button[class*="Active"], button[class*="current" i], ' +
-        'a[class*="active" i], [aria-current="true"]'
-      );
-      const current = activeBtn ? parseInt(activeBtn.textContent.trim(), 10) || 1 : 1;
-      return { current, total };
+    // Strategy 2: Compute from total rows and rows per page
+    const totalRows = getTotalRows();
+    const table = findDuneTable();
+    if (totalRows > 0 && table) {
+      const tbody = table.querySelector('tbody') || table;
+      const visibleRows = tbody.querySelectorAll('tr td').length > 0
+        ? tbody.querySelectorAll('tr').length : 0;
+      if (visibleRows > 0) {
+        const total = Math.ceil(totalRows / visibleRows);
+        return { current: 1, total };
+      }
     }
 
     return { current: 1, total: 1 };
