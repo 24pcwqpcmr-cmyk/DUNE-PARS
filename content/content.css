@@ -1,0 +1,80 @@
+/* Dune Table Scraper — Content Script Styles */
+
+.dune-scraper-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  background: rgba(0, 0, 0, 0.5);
+  backdrop-filter: blur(4px);
+  z-index: 99998;
+  opacity: 0;
+  transition: opacity 0.3s ease;
+  pointer-events: none;
+}
+
+.dune-scraper-overlay.active {
+  opacity: 1;
+  pointer-events: all;
+}
+
+.dune-scraper-toast {
+  position: fixed;
+  bottom: 24px;
+  right: 24px;
+  background: linear-gradient(135deg, #1a1b2e 0%, #2d1f4e 100%);
+  border: 1px solid rgba(139, 92, 246, 0.3);
+  border-radius: 12px;
+  padding: 16px 20px;
+  color: #e2e8f0;
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+  font-size: 14px;
+  z-index: 99999;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.4), 0 0 30px rgba(139, 92, 246, 0.1);
+  transform: translateY(100px);
+  opacity: 0;
+  transition: all 0.4s cubic-bezier(0.16, 1, 0.3, 1);
+  max-width: 360px;
+}
+
+.dune-scraper-toast.visible {
+  transform: translateY(0);
+  opacity: 1;
+}
+
+.dune-scraper-toast-title {
+  font-weight: 600;
+  margin-bottom: 4px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.dune-scraper-toast-progress {
+  width: 100%;
+  height: 3px;
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 2px;
+  margin-top: 10px;
+  overflow: hidden;
+}
+
+.dune-scraper-toast-progress-bar {
+  height: 100%;
+  background: linear-gradient(90deg, #8b5cf6, #06b6d4);
+  border-radius: 2px;
+  transition: width 0.3s ease;
+  width: 0%;
+}
+
+.dune-scraper-highlight {
+  outline: 2px solid rgba(139, 92, 246, 0.6) !important;
+  outline-offset: 2px;
+  border-radius: 4px;
+  transition: outline-color 0.3s ease;
+}
+
+.dune-scraper-highlight:hover {
+  outline-color: rgba(139, 92, 246, 1) !important;
+}
