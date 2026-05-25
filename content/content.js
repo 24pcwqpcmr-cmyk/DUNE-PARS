@@ -420,16 +420,16 @@
 
   // ── CSV Generation ─────────────────────────────────────────
 
-  function generateCSV(headersList, rowsList) {
-    function escapeCSV(value) {
-      if (value == null) return '';
-      const str = String(value);
-      if (str.includes(',') || str.includes('"') || str.includes('\n') || str.includes('\r')) {
-        return '"' + str.replace(/"/g, '""') + '"';
-      }
-      return str;
+  function escapeCSV(value) {
+    if (value == null) return '';
+    const str = String(value);
+    if (str.includes(',') || str.includes('"') || str.includes('\n') || str.includes('\r')) {
+      return '"' + str.replace(/"/g, '""') + '"';
     }
+    return str;
+  }
 
+  function generateCSV(headersList, rowsList) {
     const lines = [];
     if (headersList && headersList.length > 0) {
       lines.push(headersList.map(escapeCSV).join(','));
@@ -438,6 +438,50 @@
       lines.push(row.map(escapeCSV).join(','));
     }
     return lines.join('\r\n');
+  }
+
+  // Stream-friendly CSV blob for large datasets (avoids huge string concat)
+  function generateCSVBlob(headersList, rowsList) {
+    const CHUNK = 50000; // rows per chunk
+    const parts = ['\uFEFF']; // BOM for Excel
+
+    if (headersList && headersList.length > 0) {
+      parts.push(headersList.map(escapeCSV).join(',') + '\r\n');
+    }
+
+    for (let i = 0; i < rowsList.length; i += CHUNK) {
+      const end = Math.min(i + CHUNK, rowsList.length);
+      const lines = [];
+      for (let j = i; j < end; j++) {
+        lines.push(rowsList[j].map(escapeCSV).join(','));
+      }
+      parts.push(lines.join('\r\n') + '\r\n');
+    }
+
+    return new Blob(parts, { type: 'text/csv;charset=utf-8' });
+  }
+
+  function getFilename() {
+    const match = window.location.pathname.match(/queries\/(\d+)/);
+    const queryId = match ? match[1] : 'export';
+    const date = new Date().toISOString().slice(0, 10);
+    return `dune_${queryId}_${date}.csv`;
+  }
+
+  // Direct download from content script — no size limits
+  function downloadCSVDirect(headersList, rowsList) {
+    showToast('Generating CSV', `Building file for ${rowsList.length.toLocaleString()} rows...`, 95);
+    const blob = generateCSVBlob(headersList, rowsList);
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = getFilename();
+    a.style.display = 'none';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(url), 30000);
+    showToast('Downloaded!', `${getFilename()} — ${(blob.size / 1024 / 1024).toFixed(1)} MB`, 100);
   }
 
   // ── Fast API Mode ─────────────────────────────────────────
@@ -771,14 +815,23 @@
         : () => scrapeAllPages(message.maxPages);
 
       scrapeFn().then(result => {
-        if (result) {
-          const csv = generateCSV(result.headers, result.rows);
+        if (result && result.rows.length > 0) {
+          // Auto-download directly from content script (no message size limits)
+          downloadCSVDirect(result.headers, result.rows);
+
+          // Update stats
+          chrome.runtime.sendMessage({
+            action: 'updateStats',
+            rowCount: result.rows.length
+          });
+
+          // Notify popup (metadata only, no CSV data)
           chrome.runtime.sendMessage({
             action: 'scrapeComplete',
-            csv,
             rowCount: result.rows.length,
             pageCount: result.pageCount,
-            headers: result.headers
+            headers: result.headers,
+            autoDownloaded: true
           });
         } else {
           chrome.runtime.sendMessage({
@@ -786,7 +839,7 @@
             error: 'Scrape failed or no table found.'
           });
         }
-        setTimeout(hideToast, 5000);
+        setTimeout(hideToast, 8000);
       });
       sendResponse({ started: true });
       return;

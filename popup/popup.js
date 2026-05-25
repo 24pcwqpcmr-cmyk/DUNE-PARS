@@ -250,6 +250,18 @@
       if (message.error) {
         setStatus('offline', message.error);
         resetUI();
+      } else if (message.autoDownloaded) {
+        // CSV was auto-downloaded directly by content script
+        lastRowCount = message.rowCount;
+        lastPageCount = message.pageCount;
+        resultsPanel.classList.remove('hidden');
+        resultRowsEl.textContent = message.rowCount.toLocaleString();
+        resultPagesEl.textContent = message.pageCount;
+        resultsPreview.innerHTML = '';
+        downloadBtn.textContent = 'CSV auto-downloaded to Downloads folder';
+        downloadBtn.disabled = true;
+        setStatus('online', 'Complete! CSV saved to Downloads.');
+        resetUI();
       } else {
         lastCSV = message.csv;
         lastHeaders = message.headers;
