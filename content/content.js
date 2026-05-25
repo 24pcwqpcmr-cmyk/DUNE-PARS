@@ -21,35 +21,50 @@
   let settings = {};
   let totalRowsExpected = 0;
 
-  // Install fetch interceptor early to capture execution_id from Dune's own API calls
+  // Install fetch interceptor ASAP to capture execution_id from Dune's API calls.
+  // With run_at: document_start, this runs before Dune's scripts load.
   (function earlyInterceptor() {
-    const script = document.createElement('script');
-    script.textContent = `
-      (function() {
-        if (window.__duneScraperInterceptorInstalled) return;
-        window.__duneScraperInterceptorInstalled = true;
-        var origFetch = window.fetch;
-        window.fetch = function() {
-          var url = typeof arguments[0] === 'string' ? arguments[0] : (arguments[0] && arguments[0].url) || '';
-          if (url.indexOf('core-api.dune.com/public/execution') !== -1 && arguments[1] && arguments[1].body) {
-            try {
-              var body = JSON.parse(arguments[1].body);
-              if (body.execution_id) {
-                window.__duneScraperExecId = body.execution_id;
-                window.dispatchEvent(new CustomEvent('dune-exec-id', { detail: body.execution_id }));
-              }
-            } catch(e) {}
-          }
-          return origFetch.apply(this, arguments);
-        };
-      })();
-    `;
-    document.documentElement.appendChild(script);
-    script.remove();
+    function inject() {
+      // Create DOM bridge for main-world -> content-script communication
+      if (!document.getElementById('__dune_scraper_exec_id')) {
+        const bridge = document.createElement('div');
+        bridge.id = '__dune_scraper_exec_id';
+        bridge.style.display = 'none';
+        (document.documentElement || document.head || document.body).appendChild(bridge);
+      }
 
-    window.addEventListener('dune-exec-id', (e) => {
-      window.__duneScraperExecId = e.detail;
-    });
+      const script = document.createElement('script');
+      script.textContent = `
+        (function() {
+          if (window.__duneScraperHooked) return;
+          window.__duneScraperHooked = true;
+          var origFetch = window.fetch;
+          window.fetch = function() {
+            var url = typeof arguments[0] === 'string' ? arguments[0] : (arguments[0] && arguments[0].url) || '';
+            if (url.indexOf('core-api.dune.com') !== -1 && url.indexOf('execution') !== -1 && arguments[1] && arguments[1].body) {
+              try {
+                var body = JSON.parse(arguments[1].body);
+                if (body.execution_id) {
+                  var el = document.getElementById('__dune_scraper_exec_id');
+                  if (el) el.setAttribute('data-exec-id', body.execution_id);
+                  window.dispatchEvent(new CustomEvent('dune-exec-id', { detail: body.execution_id }));
+                }
+              } catch(e) {}
+            }
+            return origFetch.apply(this, arguments);
+          };
+        })();
+      `;
+      (document.documentElement || document.head).appendChild(script);
+      script.remove();
+    }
+
+    // document_start: documentElement exists but body might not
+    if (document.documentElement) {
+      inject();
+    } else {
+      document.addEventListener('DOMContentLoaded', inject, { once: true });
+    }
   })();
 
   // ── Utilities ──────────────────────────────────────────────
@@ -500,72 +515,129 @@
     return match ? parseInt(match[1], 10) : null;
   }
 
-  function getExecutionIdFromPage() {
-    // Intercept: we capture execution_id from Dune's own API calls
-    return window.__duneScraperExecId || null;
+  // Storage for execution_id captured via DOM bridge
+  let capturedExecId = null;
+
+  function readExecIdFromDOM() {
+    const el = document.getElementById('__dune_scraper_exec_id');
+    if (el) return el.getAttribute('data-exec-id') || null;
+    return null;
   }
 
   function installFetchInterceptor() {
-    if (window.__duneScraperInterceptorInstalled) return;
-    window.__duneScraperInterceptorInstalled = true;
+    // Bridge element and interceptor are already installed by earlyInterceptor.
+    // Just set up the event listener in case it wasn't done yet.
+    if (!document.getElementById('__dune_scraper_exec_id')) {
+      const bridge = document.createElement('div');
+      bridge.id = '__dune_scraper_exec_id';
+      bridge.style.display = 'none';
+      document.documentElement.appendChild(bridge);
 
-    const script = document.createElement('script');
-    script.textContent = `
-      (function() {
-        var origFetch = window.fetch;
-        window.fetch = function() {
-          var url = typeof arguments[0] === 'string' ? arguments[0] : (arguments[0] && arguments[0].url) || '';
-          if (url.indexOf('core-api.dune.com/public/execution') !== -1 && arguments[1] && arguments[1].body) {
-            try {
-              var body = JSON.parse(arguments[1].body);
-              if (body.execution_id) {
-                window.__duneScraperExecId = body.execution_id;
-                window.dispatchEvent(new CustomEvent('dune-exec-id', { detail: body.execution_id }));
-              }
-            } catch(e) {}
-          }
-          return origFetch.apply(this, arguments);
-        };
-      })();
-    `;
-    document.documentElement.appendChild(script);
-    script.remove();
+      const script = document.createElement('script');
+      script.textContent = `
+        (function() {
+          if (window.__duneScraperHooked) return;
+          window.__duneScraperHooked = true;
+          var origFetch = window.fetch;
+          window.fetch = function() {
+            var url = typeof arguments[0] === 'string' ? arguments[0] : (arguments[0] && arguments[0].url) || '';
+            if (url.indexOf('core-api.dune.com') !== -1 && url.indexOf('execution') !== -1 && arguments[1] && arguments[1].body) {
+              try {
+                var body = JSON.parse(arguments[1].body);
+                if (body.execution_id) {
+                  var el = document.getElementById('__dune_scraper_exec_id');
+                  if (el) el.setAttribute('data-exec-id', body.execution_id);
+                  window.dispatchEvent(new CustomEvent('dune-exec-id', { detail: body.execution_id }));
+                }
+              } catch(e) {}
+            }
+            return origFetch.apply(this, arguments);
+          };
+        })();
+      `;
+      document.documentElement.appendChild(script);
+      script.remove();
+    }
 
     window.addEventListener('dune-exec-id', (e) => {
-      window.__duneScraperExecId = e.detail;
+      capturedExecId = e.detail;
     });
   }
 
-  async function waitForExecutionId(timeoutMs = 15000) {
-    // First check if we already have it
-    if (window.__duneScraperExecId) return window.__duneScraperExecId;
+  async function waitForExecutionId(timeoutMs = 20000) {
+    // Check if already captured
+    if (capturedExecId) return capturedExecId;
+    const fromDOM = readExecIdFromDOM();
+    if (fromDOM) { capturedExecId = fromDOM; return fromDOM; }
 
-    // Install interceptor and wait for next page navigation to capture it
+    // Make sure interceptor is installed
     installFetchInterceptor();
 
-    // Try triggering a page fetch by clicking next then back
+    // Strategy 1: Click next page to trigger an API call, then go back
+    showToast('Fast Mode', 'Capturing execution ID... (clicking next page)', 0);
     const nextBtn = findNextPageButton();
     if (nextBtn) {
       nextBtn.click();
-      await sleep(1500);
-      // Capture should have happened
-      if (window.__duneScraperExecId) {
-        // Go back to page 1
-        const prevSvg = document.querySelector('svg[aria-label="Previous page"]');
-        if (prevSvg) {
-          const prevBtn = prevSvg.closest('button');
-          if (prevBtn && !prevBtn.disabled) prevBtn.click();
-          await sleep(1000);
+      // Wait and poll for the exec id
+      for (let i = 0; i < 20; i++) {
+        await sleep(300);
+        const id = capturedExecId || readExecIdFromDOM();
+        if (id) {
+          capturedExecId = id;
+          // Navigate back
+          const prevSvg = document.querySelector('svg[aria-label="Previous page"]');
+          if (prevSvg) {
+            const prevBtn = prevSvg.closest('button');
+            if (prevBtn && !prevBtn.disabled) {
+              prevBtn.click();
+              await sleep(800);
+            }
+          }
+          return id;
         }
-        return window.__duneScraperExecId;
       }
     }
 
-    // Fallback: wait for user to navigate
+    // Strategy 2: Try clicking page 2 button directly
+    const footer = findPaginationFooter();
+    if (footer) {
+      const buttons = footer.querySelectorAll('button');
+      for (const btn of buttons) {
+        if (btn.textContent.trim() === '2') {
+          btn.click();
+          for (let i = 0; i < 20; i++) {
+            await sleep(300);
+            const id = capturedExecId || readExecIdFromDOM();
+            if (id) {
+              capturedExecId = id;
+              // Go back to page 1
+              const btn1 = Array.from(footer.querySelectorAll('button')).find(b => b.textContent.trim() === '1');
+              if (btn1) { btn1.click(); await sleep(800); }
+              return id;
+            }
+          }
+          break;
+        }
+      }
+    }
+
+    // Strategy 3: Wait for user interaction
+    showToast('Waiting', 'Click any page number to activate Fast Mode...', 0);
     return new Promise((resolve, reject) => {
-      const timeout = setTimeout(() => reject(new Error('Timeout waiting for execution_id')), timeoutMs);
+      const timeout = setTimeout(() => reject(new Error('Timeout waiting for execution_id. Navigate to another page and try again.')), timeoutMs);
+      const checkInterval = setInterval(() => {
+        const id = capturedExecId || readExecIdFromDOM();
+        if (id) {
+          clearTimeout(timeout);
+          clearInterval(checkInterval);
+          capturedExecId = id;
+          resolve(id);
+        }
+      }, 200);
       window.addEventListener('dune-exec-id', (e) => {
         clearTimeout(timeout);
+        clearInterval(checkInterval);
+        capturedExecId = e.detail;
         resolve(e.detail);
       }, { once: true });
     });
