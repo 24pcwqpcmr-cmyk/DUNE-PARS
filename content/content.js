@@ -560,7 +560,20 @@
     return response.json();
   }
 
-  async function scrapeViaAPI(maxRows) {
+  function processAPIResult(result) {
+    const rows = result.data || [];
+    const processed = [];
+    for (const row of rows) {
+      const rowArr = headers.map(h => {
+        const val = row[h];
+        return val != null ? String(val) : '';
+      });
+      processed.push(rowArr);
+    }
+    return processed;
+  }
+
+  async function scrapeViaAPI(maxRows, turbo) {
     isRunning = true;
     shouldStop = false;
     collectedRows = [];
@@ -572,88 +585,110 @@
       return null;
     }
 
-    try {
-      settings = await new Promise(resolve => {
-        chrome.runtime.sendMessage({ action: 'getSettings' }, resolve);
-      });
-    } catch (e) {
-      settings = { minDelay: 300, maxDelay: 800 };
-    }
+    // Turbo mode: parallel requests, no delays, larger batches
+    const PARALLEL = turbo ? 10 : 1;
+    const BATCH_SIZE = turbo ? 5000 : 1000;
 
-    const minDelay = Math.max(settings.minDelay || 300, 100);
-    const maxDelay = Math.max(settings.maxDelay || 800, 200);
-    const batchSize = 1000; // rows per API call
-
-    showToast('Fast Mode', 'Detecting execution ID...', 0);
+    showToast(turbo ? 'TURBO Mode' : 'Fast Mode', 'Detecting execution ID...', 0);
 
     let executionId;
     try {
       executionId = await waitForExecutionId();
     } catch (e) {
-      showToast('Error', 'Could not detect execution ID. Try navigating to another page first.');
+      showToast('Error', e.message || 'Could not detect execution ID.');
       isRunning = false;
       return null;
     }
 
     totalRowsExpected = getTotalRows() || 0;
     const effectiveMax = maxRows || totalRowsExpected || 999999;
+    const modeLabel = turbo ? 'TURBO' : 'Fast';
 
-    showToast('Fast Mode', `Fetching data via API... (${totalRowsExpected.toLocaleString()} rows total)`, 0);
+    showToast(`${modeLabel} Mode`, `Fetching ${effectiveMax.toLocaleString()} rows (${PARALLEL} parallel, ${BATCH_SIZE}/batch)...`, 0);
 
-    // First request to get headers
+    // First request — get headers
     let offset = 0;
     let batchNum = 0;
 
     try {
+      const firstData = await fetchAPIPage(executionId, queryId, BATCH_SIZE, 0);
+      if (firstData.execution_running || firstData.execution_queued) {
+        showToast('Waiting', 'Query still running... retrying in 3s');
+        await sleep(3000);
+      }
+      if (firstData.execution_succeeded) {
+        const result = firstData.execution_succeeded;
+        if (result.columns) headers = result.columns;
+        const rows = processAPIResult(result);
+        collectedRows.push(...rows);
+        offset = rows.length;
+        batchNum = 1;
+        if (rows.length < BATCH_SIZE) {
+          // All data fits in one batch
+          isRunning = false;
+          showToast('Complete!', `${collectedRows.length.toLocaleString()} rows fetched!`, 100);
+          return { headers, rows: collectedRows, pageCount: 1 };
+        }
+      } else {
+        showToast('Error', 'Unexpected API response on first batch');
+        isRunning = false;
+        return null;
+      }
+
+      // Parallel fetching loop
       while (offset < effectiveMax && !shouldStop) {
-        const limit = Math.min(batchSize, effectiveMax - offset);
-        const data = await fetchAPIPage(executionId, queryId, limit, offset);
-
-        if (data.execution_succeeded) {
-          const result = data.execution_succeeded;
-
-          // Extract headers from first batch
-          if (batchNum === 0 && result.columns) {
-            headers = result.columns;
-          }
-
-          // Extract rows
-          const rows = result.data || [];
-          if (rows.length === 0) break; // no more data
-
-          for (const row of rows) {
-            const rowArr = headers.map(h => {
-              const val = row[h];
-              return val != null ? String(val) : '';
-            });
-            collectedRows.push(rowArr);
-          }
-
-          offset += rows.length;
-          batchNum++;
-
-          const progress = totalRowsExpected > 0
-            ? (collectedRows.length / Math.min(totalRowsExpected, effectiveMax)) * 100
-            : 0;
-
-          showToast(
-            `Fast Mode — Batch ${batchNum}`,
-            `${collectedRows.length.toLocaleString()} / ${Math.min(totalRowsExpected, effectiveMax).toLocaleString()} rows`,
-            Math.min(progress, 100)
+        const tasks = [];
+        for (let i = 0; i < PARALLEL && offset + i * BATCH_SIZE < effectiveMax; i++) {
+          const taskOffset = offset + i * BATCH_SIZE;
+          const taskLimit = Math.min(BATCH_SIZE, effectiveMax - taskOffset);
+          tasks.push(
+            fetchAPIPage(executionId, queryId, taskLimit, taskOffset)
+              .then(data => ({ offset: taskOffset, data, error: null }))
+              .catch(error => ({ offset: taskOffset, data: null, error }))
           );
+        }
 
-          // If we got fewer rows than requested, we've reached the end
-          if (rows.length < limit) break;
+        const results = await Promise.all(tasks);
+        results.sort((a, b) => a.offset - b.offset);
 
-          // Anti-detection delay between batches
-          await randomDelay(minDelay, maxDelay);
+        let hitEnd = false;
+        let totalNewRows = 0;
+        for (const res of results) {
+          if (shouldStop) break;
+          if (res.error) {
+            // On error in turbo, just skip and continue
+            if (!turbo) throw res.error;
+            continue;
+          }
+          if (res.data.execution_succeeded) {
+            const rows = processAPIResult(res.data.execution_succeeded);
+            collectedRows.push(...rows);
+            totalNewRows += rows.length;
+            if (rows.length < BATCH_SIZE) { hitEnd = true; break; }
+          }
+        }
 
-        } else if (data.execution_running || data.execution_queued) {
-          showToast('Waiting', 'Query is still running... retrying in 3s');
-          await sleep(3000);
-        } else {
-          showToast('Error', 'Unexpected API response');
-          break;
+        offset += PARALLEL * BATCH_SIZE;
+        batchNum += results.length;
+
+        const progress = totalRowsExpected > 0
+          ? (collectedRows.length / Math.min(totalRowsExpected, effectiveMax)) * 100
+          : 0;
+
+        const speed = turbo ? ` (~${(totalNewRows * PARALLEL).toLocaleString()} rows/wave)` : '';
+        showToast(
+          `${modeLabel} — Wave ${Math.ceil(batchNum / PARALLEL)}`,
+          `${collectedRows.length.toLocaleString()} / ${effectiveMax.toLocaleString()} rows${speed}`,
+          Math.min(progress, 100)
+        );
+
+        if (hitEnd) break;
+
+        // Small delay only in non-turbo mode
+        if (!turbo) {
+          const minD = Math.max(settings.minDelay || 300, 100);
+          const maxD = Math.max(settings.maxDelay || 800, 200);
+          await randomDelay(minD, maxD);
         }
       }
     } catch (e) {
@@ -669,7 +704,7 @@
     if (shouldStop) {
       showToast('Stopped', `Collected ${collectedRows.length.toLocaleString()} rows before stopping.`, 100);
     } else {
-      showToast('Complete!', `${collectedRows.length.toLocaleString()} rows fetched via API!`, 100);
+      showToast('Complete!', `${collectedRows.length.toLocaleString()} rows fetched via ${modeLabel}!`, 100);
     }
 
     return { headers, rows: collectedRows, pageCount: batchNum };
@@ -730,8 +765,9 @@
 
     if (message.action === 'scrapeAllPages') {
       const useFastMode = message.fastMode === true;
+      const turbo = message.turbo === true;
       const scrapeFn = useFastMode
-        ? () => scrapeViaAPI(message.maxRows)
+        ? () => scrapeViaAPI(message.maxRows, turbo)
         : () => scrapeAllPages(message.maxPages);
 
       scrapeFn().then(result => {

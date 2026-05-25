@@ -32,6 +32,8 @@
   const modeFastBtn = document.getElementById('modeFast');
   const domOptions = document.getElementById('domOptions');
   const fastOptions = document.getElementById('fastOptions');
+  const turboCheck = document.getElementById('turboCheck');
+  const fastHint = document.getElementById('fastHint');
 
   const resultsPanel = document.getElementById('resultsPanel');
   const resultRowsEl = document.getElementById('resultRows');
@@ -170,10 +172,11 @@
     progressPanel.classList.remove('hidden');
     resultsPanel.classList.add('hidden');
 
-    const msg = { action: 'scrapeAllPages', fastMode };
+    const turbo = fastMode && turboCheck.checked;
+    const msg = { action: 'scrapeAllPages', fastMode, turbo };
     if (fastMode) {
       msg.maxRows = parseInt(maxRowsInput.value, 10) || 0;
-      setStatus('running', 'Fast Mode — fetching via API...');
+      setStatus('running', turbo ? 'TURBO — max speed, parallel fetch...' : 'Fast Mode — fetching via API...');
     } else {
       msg.maxPages = parseInt(maxPagesInput.value, 10) || 0;
       setStatus('running', 'DOM Mode — scraping pages...');
@@ -467,6 +470,11 @@
 
   modeDOMBtn.addEventListener('click', () => setMode('dom'));
   modeFastBtn.addEventListener('click', () => setMode('fast'));
+  turboCheck.addEventListener('change', () => {
+    fastHint.textContent = turboCheck.checked
+      ? 'TURBO: 10 parallel \u00d7 5000/batch \u00b7 no delays \u00b7 max speed'
+      : 'Fast: 1 request \u00d7 1000/batch \u00b7 with delays \u00b7 stealth';
+  });
   scrapePageBtn.addEventListener('click', scrapeCurrentPage);
   scrapeAllBtn.addEventListener('click', scrapeAllPages);
   stopBtn.addEventListener('click', stopScraping);
