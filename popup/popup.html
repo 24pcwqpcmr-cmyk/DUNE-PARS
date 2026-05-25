@@ -110,11 +110,33 @@
         </button>
       </div>
 
-      <!-- Max Pages Control -->
-      <div class="panel options-inline" id="maxPagesPanel">
-        <label for="maxPages" class="option-label">Max pages to scrape:</label>
-        <input type="number" id="maxPages" class="option-input" value="0" min="0" step="1" placeholder="0 = all">
-        <span class="option-hint">0 = unlimited</span>
+      <!-- Mode Toggle -->
+      <div class="panel mode-toggle-panel" id="modePanel">
+        <div class="mode-toggle">
+          <button id="modeDOM" class="mode-btn" title="Click through pages (slower, more stealth)">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <rect x="3" y="3" width="18" height="18" rx="2"/>
+              <path d="M3 9h18M9 3v18"/>
+            </svg>
+            DOM Mode
+          </button>
+          <button id="modeFast" class="mode-btn active" title="Direct API fetch (much faster, 1000 rows/batch)">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/>
+            </svg>
+            Fast Mode
+          </button>
+        </div>
+        <div id="domOptions" class="mode-options hidden">
+          <label for="maxPages" class="option-label">Max pages:</label>
+          <input type="number" id="maxPages" class="option-input" value="0" min="0" step="1" placeholder="0 = all">
+          <span class="option-hint">0 = unlimited</span>
+        </div>
+        <div id="fastOptions" class="mode-options">
+          <label for="maxRows" class="option-label">Max rows:</label>
+          <input type="number" id="maxRows" class="option-input" value="0" min="0" step="1000" placeholder="0 = all">
+          <span class="option-hint">0 = all rows · fetches 1000/batch via API</span>
+        </div>
       </div>
 
       <!-- Results Preview -->

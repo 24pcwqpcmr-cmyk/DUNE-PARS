@@ -26,6 +26,12 @@
   const stopBtn = document.getElementById('stopBtn');
   const actionsPanel = document.getElementById('actionsPanel');
   const maxPagesInput = document.getElementById('maxPages');
+  const maxRowsInput = document.getElementById('maxRows');
+
+  const modeDOMBtn = document.getElementById('modeDOM');
+  const modeFastBtn = document.getElementById('modeFast');
+  const domOptions = document.getElementById('domOptions');
+  const fastOptions = document.getElementById('fastOptions');
 
   const resultsPanel = document.getElementById('resultsPanel');
   const resultRowsEl = document.getElementById('resultRows');
@@ -51,6 +57,7 @@
   let lastRowCount = 0;
   let lastPageCount = 0;
   let pollInterval = null;
+  let fastMode = true; // default to fast mode
 
   // ── Initialize ─────────────────────────────────────────
 
@@ -157,20 +164,24 @@
   async function scrapeAllPages() {
     if (!currentTabId) return;
 
-    const maxPages = parseInt(maxPagesInput.value, 10) || 0;
-
     scrapePageBtn.disabled = true;
     scrapeAllBtn.classList.add('hidden');
     stopBtn.classList.remove('hidden');
     progressPanel.classList.remove('hidden');
     resultsPanel.classList.add('hidden');
 
-    setStatus('running', 'Scraping all pages...');
+    const msg = { action: 'scrapeAllPages', fastMode };
+    if (fastMode) {
+      msg.maxRows = parseInt(maxRowsInput.value, 10) || 0;
+      setStatus('running', 'Fast Mode — fetching via API...');
+    } else {
+      msg.maxPages = parseInt(maxPagesInput.value, 10) || 0;
+      setStatus('running', 'DOM Mode — scraping pages...');
+    }
     updateProgress(0, 0, 0);
 
     try {
-      await sendToContent({ action: 'scrapeAllPages', maxPages });
-      // Start polling for progress
+      await sendToContent(msg);
       startPolling();
     } catch (err) {
       setStatus('offline', 'Error: ' + err.message);
@@ -432,8 +443,30 @@
     });
   }
 
+  // ── Mode Toggle ─────────────────────────────────────────
+
+  function setMode(mode) {
+    fastMode = mode === 'fast';
+    modeFastBtn.classList.toggle('active', fastMode);
+    modeDOMBtn.classList.toggle('active', !fastMode);
+    fastOptions.classList.toggle('hidden', !fastMode);
+    domOptions.classList.toggle('hidden', fastMode);
+    scrapeAllBtn.innerHTML = fastMode
+      ? `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+           <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/>
+         </svg>
+         Fast Export → CSV`
+      : `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+           <path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/>
+           <polyline points="13 2 13 9 20 9"/>
+         </svg>
+         All Pages → CSV`;
+  }
+
   // ── Event Listeners ────────────────────────────────────
 
+  modeDOMBtn.addEventListener('click', () => setMode('dom'));
+  modeFastBtn.addEventListener('click', () => setMode('fast'));
   scrapePageBtn.addEventListener('click', scrapeCurrentPage);
   scrapeAllBtn.addEventListener('click', scrapeAllPages);
   stopBtn.addEventListener('click', stopScraping);
@@ -443,5 +476,6 @@
   saveSettingsBtn.addEventListener('click', saveSettings);
 
   // ── Start ──────────────────────────────────────────────
+  setMode('fast');
   init();
 })();

@@ -21,6 +21,37 @@
   let settings = {};
   let totalRowsExpected = 0;
 
+  // Install fetch interceptor early to capture execution_id from Dune's own API calls
+  (function earlyInterceptor() {
+    const script = document.createElement('script');
+    script.textContent = `
+      (function() {
+        if (window.__duneScraperInterceptorInstalled) return;
+        window.__duneScraperInterceptorInstalled = true;
+        var origFetch = window.fetch;
+        window.fetch = function() {
+          var url = typeof arguments[0] === 'string' ? arguments[0] : (arguments[0] && arguments[0].url) || '';
+          if (url.indexOf('core-api.dune.com/public/execution') !== -1 && arguments[1] && arguments[1].body) {
+            try {
+              var body = JSON.parse(arguments[1].body);
+              if (body.execution_id) {
+                window.__duneScraperExecId = body.execution_id;
+                window.dispatchEvent(new CustomEvent('dune-exec-id', { detail: body.execution_id }));
+              }
+            } catch(e) {}
+          }
+          return origFetch.apply(this, arguments);
+        };
+      })();
+    `;
+    document.documentElement.appendChild(script);
+    script.remove();
+
+    window.addEventListener('dune-exec-id', (e) => {
+      window.__duneScraperExecId = e.detail;
+    });
+  })();
+
   // ── Utilities ──────────────────────────────────────────────
 
   function sleep(ms) {
@@ -437,6 +468,248 @@
     return lines.join('\r\n');
   }
 
+  // ── Fast API Mode ─────────────────────────────────────────
+  // Uses Dune's internal public API (core-api.dune.com) to fetch
+  // data in bulk — no page clicking, no DOM parsing per page.
+  // Works via browser session (no paid API key needed).
+
+  const DUNE_API_URL = 'https://core-api.dune.com/public/execution';
+  const HMAC_KEY = 'public-01K4W0KHXNC30MKZMRZY91HKM6';
+
+  async function generateSignature(params) {
+    const encoder = new TextEncoder();
+    const key = await crypto.subtle.importKey(
+      'raw',
+      encoder.encode(HMAC_KEY),
+      { name: 'HMAC', hash: 'SHA-256' },
+      false,
+      ['sign']
+    );
+    const limit = params.pagination?.limit ?? 0;
+    const offset = params.pagination?.offset ?? 0;
+    const message = `${params.ts.toString()}${params.execution_id}${params.query_id.toString()}${limit.toString()}${offset.toString()}`;
+    const signature = await crypto.subtle.sign('HMAC', key, encoder.encode(message));
+    return btoa(String.fromCharCode(...new Uint8Array(signature)))
+      .replace(/\+/g, '-')
+      .replace(/\//g, '_')
+      .replace(/=+$/g, '');
+  }
+
+  function getQueryIdFromURL() {
+    const match = window.location.pathname.match(/queries\/(\d+)/);
+    return match ? parseInt(match[1], 10) : null;
+  }
+
+  function getExecutionIdFromPage() {
+    // Intercept: we capture execution_id from Dune's own API calls
+    return window.__duneScraperExecId || null;
+  }
+
+  function installFetchInterceptor() {
+    if (window.__duneScraperInterceptorInstalled) return;
+    window.__duneScraperInterceptorInstalled = true;
+
+    const script = document.createElement('script');
+    script.textContent = `
+      (function() {
+        var origFetch = window.fetch;
+        window.fetch = function() {
+          var url = typeof arguments[0] === 'string' ? arguments[0] : (arguments[0] && arguments[0].url) || '';
+          if (url.indexOf('core-api.dune.com/public/execution') !== -1 && arguments[1] && arguments[1].body) {
+            try {
+              var body = JSON.parse(arguments[1].body);
+              if (body.execution_id) {
+                window.__duneScraperExecId = body.execution_id;
+                window.dispatchEvent(new CustomEvent('dune-exec-id', { detail: body.execution_id }));
+              }
+            } catch(e) {}
+          }
+          return origFetch.apply(this, arguments);
+        };
+      })();
+    `;
+    document.documentElement.appendChild(script);
+    script.remove();
+
+    window.addEventListener('dune-exec-id', (e) => {
+      window.__duneScraperExecId = e.detail;
+    });
+  }
+
+  async function waitForExecutionId(timeoutMs = 15000) {
+    // First check if we already have it
+    if (window.__duneScraperExecId) return window.__duneScraperExecId;
+
+    // Install interceptor and wait for next page navigation to capture it
+    installFetchInterceptor();
+
+    // Try triggering a page fetch by clicking next then back
+    const nextBtn = findNextPageButton();
+    if (nextBtn) {
+      nextBtn.click();
+      await sleep(1500);
+      // Capture should have happened
+      if (window.__duneScraperExecId) {
+        // Go back to page 1
+        const prevSvg = document.querySelector('svg[aria-label="Previous page"]');
+        if (prevSvg) {
+          const prevBtn = prevSvg.closest('button');
+          if (prevBtn && !prevBtn.disabled) prevBtn.click();
+          await sleep(1000);
+        }
+        return window.__duneScraperExecId;
+      }
+    }
+
+    // Fallback: wait for user to navigate
+    return new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error('Timeout waiting for execution_id')), timeoutMs);
+      window.addEventListener('dune-exec-id', (e) => {
+        clearTimeout(timeout);
+        resolve(e.detail);
+      }, { once: true });
+    });
+  }
+
+  async function fetchAPIPage(executionId, queryId, limit, offset) {
+    const ts = Date.now();
+    const params = {
+      execution_id: executionId,
+      query_id: queryId,
+      parameters: [],
+      pagination: { limit, offset },
+      ts
+    };
+    params.s = await generateSignature(params);
+
+    const response = await fetch(DUNE_API_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(params)
+    });
+
+    if (!response.ok) {
+      throw new Error(`API error: ${response.status} ${response.statusText}`);
+    }
+
+    return response.json();
+  }
+
+  async function scrapeViaAPI(maxRows) {
+    isRunning = true;
+    shouldStop = false;
+    collectedRows = [];
+
+    const queryId = getQueryIdFromURL();
+    if (!queryId) {
+      showToast('Error', 'Could not detect query ID from URL.');
+      isRunning = false;
+      return null;
+    }
+
+    try {
+      settings = await new Promise(resolve => {
+        chrome.runtime.sendMessage({ action: 'getSettings' }, resolve);
+      });
+    } catch (e) {
+      settings = { minDelay: 300, maxDelay: 800 };
+    }
+
+    const minDelay = Math.max(settings.minDelay || 300, 100);
+    const maxDelay = Math.max(settings.maxDelay || 800, 200);
+    const batchSize = 1000; // rows per API call
+
+    showToast('Fast Mode', 'Detecting execution ID...', 0);
+
+    let executionId;
+    try {
+      executionId = await waitForExecutionId();
+    } catch (e) {
+      showToast('Error', 'Could not detect execution ID. Try navigating to another page first.');
+      isRunning = false;
+      return null;
+    }
+
+    totalRowsExpected = getTotalRows() || 0;
+    const effectiveMax = maxRows || totalRowsExpected || 999999;
+
+    showToast('Fast Mode', `Fetching data via API... (${totalRowsExpected.toLocaleString()} rows total)`, 0);
+
+    // First request to get headers
+    let offset = 0;
+    let batchNum = 0;
+
+    try {
+      while (offset < effectiveMax && !shouldStop) {
+        const limit = Math.min(batchSize, effectiveMax - offset);
+        const data = await fetchAPIPage(executionId, queryId, limit, offset);
+
+        if (data.execution_succeeded) {
+          const result = data.execution_succeeded;
+
+          // Extract headers from first batch
+          if (batchNum === 0 && result.columns) {
+            headers = result.columns;
+          }
+
+          // Extract rows
+          const rows = result.data || [];
+          if (rows.length === 0) break; // no more data
+
+          for (const row of rows) {
+            const rowArr = headers.map(h => {
+              const val = row[h];
+              return val != null ? String(val) : '';
+            });
+            collectedRows.push(rowArr);
+          }
+
+          offset += rows.length;
+          batchNum++;
+
+          const progress = totalRowsExpected > 0
+            ? (collectedRows.length / Math.min(totalRowsExpected, effectiveMax)) * 100
+            : 0;
+
+          showToast(
+            `Fast Mode — Batch ${batchNum}`,
+            `${collectedRows.length.toLocaleString()} / ${Math.min(totalRowsExpected, effectiveMax).toLocaleString()} rows`,
+            Math.min(progress, 100)
+          );
+
+          // If we got fewer rows than requested, we've reached the end
+          if (rows.length < limit) break;
+
+          // Anti-detection delay between batches
+          await randomDelay(minDelay, maxDelay);
+
+        } else if (data.execution_running || data.execution_queued) {
+          showToast('Waiting', 'Query is still running... retrying in 3s');
+          await sleep(3000);
+        } else {
+          showToast('Error', 'Unexpected API response');
+          break;
+        }
+      }
+    } catch (e) {
+      showToast('API Error', e.message);
+      if (collectedRows.length === 0) {
+        isRunning = false;
+        return null;
+      }
+    }
+
+    isRunning = false;
+
+    if (shouldStop) {
+      showToast('Stopped', `Collected ${collectedRows.length.toLocaleString()} rows before stopping.`, 100);
+    } else {
+      showToast('Complete!', `${collectedRows.length.toLocaleString()} rows fetched via API!`, 100);
+    }
+
+    return { headers, rows: collectedRows, pageCount: batchNum };
+  }
+
   // ── Quick Scrape (current page only) ───────────────────────
 
   function scrapeCurrentPage() {
@@ -491,8 +764,12 @@
     }
 
     if (message.action === 'scrapeAllPages') {
-      // Async operation — respond immediately, send result via separate message
-      scrapeAllPages(message.maxPages).then(result => {
+      const useFastMode = message.fastMode === true;
+      const scrapeFn = useFastMode
+        ? () => scrapeViaAPI(message.maxRows)
+        : () => scrapeAllPages(message.maxPages);
+
+      scrapeFn().then(result => {
         if (result) {
           const csv = generateCSV(result.headers, result.rows);
           chrome.runtime.sendMessage({
@@ -508,7 +785,6 @@
             error: 'Scrape failed or no table found.'
           });
         }
-        // Hide toast after a delay
         setTimeout(hideToast, 5000);
       });
       sendResponse({ started: true });
