@@ -3,6 +3,32 @@
  * Handles CSV download requests and manages extension state.
  */
 
+// ── Execution ID capture via webRequest ────────────────────
+// Stores the last captured execution_id per tab, so content scripts
+// can retrieve it reliably without page-world injection hacks.
+const tabExecIds = {};
+
+chrome.webRequest.onBeforeRequest.addListener(
+  (details) => {
+    if (details.method !== 'POST' || !details.requestBody?.raw) return;
+    try {
+      const bytes = details.requestBody.raw[0].bytes;
+      const text = new TextDecoder().decode(bytes);
+      const body = JSON.parse(text);
+      if (body.execution_id && details.tabId > 0) {
+        tabExecIds[details.tabId] = body.execution_id;
+      }
+    } catch (e) { /* ignore parse errors */ }
+  },
+  { urls: ['https://core-api.dune.com/*'] },
+  ['requestBody']
+);
+
+// Clean up when tabs close
+chrome.tabs.onRemoved.addListener((tabId) => {
+  delete tabExecIds[tabId];
+});
+
 // Default settings
 const DEFAULT_SETTINGS = {
   minDelay: 800,
@@ -47,6 +73,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       sendResponse(result.stats || { totalExports: 0, totalRows: 0 });
     });
     return true;
+  }
+
+  if (message.action === 'getExecutionId') {
+    const tabId = sender.tab?.id;
+    sendResponse({ executionId: tabId ? (tabExecIds[tabId] || null) : null });
+    return;
   }
 
   if (message.action === 'updateStats') {

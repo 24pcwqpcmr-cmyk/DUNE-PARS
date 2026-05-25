@@ -6,7 +6,8 @@
   "permissions": [
     "activeTab",
     "downloads",
-    "storage"
+    "storage",
+    "webRequest"
   ],
   "host_permissions": [
     "https://dune.com/*",
@@ -30,7 +31,7 @@
       "matches": ["https://dune.com/*"],
       "js": ["content/content.js"],
       "css": ["content/content.css"],
-      "run_at": "document_start"
+      "run_at": "document_idle"
     }
   ],
   "background": {
